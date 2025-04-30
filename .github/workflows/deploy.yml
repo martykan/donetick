@@ -1,0 +1,88 @@
+name: Deploy
+
+permissions:
+  id-token: write
+  contents: write
+
+on: workflow_dispatch
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    environment: main
+    name: Deploy Frontend
+    steps:
+      - name: Checkout Frontend
+        uses: actions/checkout@v4
+        with:
+          repository: "donetick/frontend"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: "frontend-code"
+      # build frontend
+      - name: Install Node.js
+        uses: actions/setup-node@v2
+        with:
+          node-version: "16"
+      - name: Install Dependencies
+        run: |
+          cd frontend-code
+          npm install
+      - name: Build Frontend
+        env:
+          VITE_APP_API_URL: ${{ secrets.DEPLOYMENT_API_URL }}
+        run: |
+          cd frontend-code
+          echo "VITE_APP_API_URL=${{ secrets.DEPLOYMENT_API_URL }}" > .env.selfhosted.local
+          npm run build-selfhosted
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Upload to blob storage
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az storage blob upload-batch --account-name hw200storage --auth-mode key -d '$web' --overwrite -s frontend-code/dist/
+  backend:
+    runs-on: ubuntu-latest
+    environment: main
+    name: Deploy Backend
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: "Docker Login"
+        uses: azure/docker-login@v1
+        with:
+          login-server: ${{ secrets.REGISTRY_LOGIN_SERVER }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: "Build and Push Docker Image"
+        run: |
+          docker build . -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/donetick:${{ github.sha }}
+          docker tag ${{ secrets.REGISTRY_LOGIN_SERVER }}/donetick:${{ github.sha }} ${{ secrets.REGISTRY_LOGIN_SERVER }}/donetick:latest
+          docker push ${{ secrets.REGISTRY_LOGIN_SERVER }}/donetick:${{ github.sha }}
+          docker push ${{ secrets.REGISTRY_LOGIN_SERVER }}/donetick:latest
+
+      - name: "Update App Service deployment"
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az webapp config container set --name pa200-hw2-martykan --resource-group PA200_HW2 --container-image-name ${{ secrets.REGISTRY_LOGIN_SERVER }}/donetick:${{ github.sha }}
+            az webapp restart --name pa200-hw2-martykan --resource-group PA200_HW2
